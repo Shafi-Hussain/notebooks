@@ -1,4 +1,62 @@
 ####################
+# rpm-base         #
+####################
+FROM registry.access.redhat.com/ubi9/ubi:9.5 AS rpm-base
+
+ARG NODE_VERSION=20
+
+ARG CODESERVER_VERSION=v4.98.0
+
+ENV NVM_DIR=/root/.nvm \
+    VENV=/opt/.venv
+
+ENV PATH=${VENV}/bin:$PATH
+
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1 \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+# install build dependencies
+RUN dnf install -y \
+    git gcc-toolset-13 rsync krb5-devel libX11-devel gettext jq patch \
+    python3.11-pip python3.12-pip python3.11-devel python3.12-devel \
+    https://rpmfind.net/linux/centos-stream/9-stream/CRB/$(uname -m)/os/Packages/libxkbfile-devel-1.1.0-8.el9.$(uname -m).rpm \
+    && cd /tmp && touch control
+
+# install nfpm to build rpm
+RUN VERSION=$(curl -s "https://api.github.com/repos/goreleaser/nfpm/releases/latest" | jq -r '.tag_name') \
+    && dnf install -y https://github.com/goreleaser/nfpm/releases/download/${VERSION}/nfpm-${VERSION:1}-1.$(uname -m).rpm
+
+# install node
+RUN VERSION=$(curl -s "https://api.github.com/repos/nvm-sh/nvm/releases/latest" | jq -r '.tag_name') \
+    && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/${VERSION}/install.sh | bash \
+    && source ${NVM_DIR}/nvm.sh && nvm install ${NODE_VERSION}
+
+# create python env
+RUN python3.12 -m venv ${VENV}
+
+# Build or Fetch RPM
+RUN \
+    if [[ "$(uname -m)" = "x86_64" ]]; then \
+        curl -L "https://github.com/coder/code-server/releases/download/${CODESERVER_VERSION}/code-server-${CODESERVER_VERSION/v/}-amd64.rpm" -o /tmp/code-server-${CODESERVER_VERSION/v/}-amd64.rpm; \
+    elif [[ "$(uname -m)" = "ppc64le" ]]; then \
+        git clone https://github.com/coder/code-server.git && \
+        cd code-server && \
+        git checkout ${CODESERVER_VERSION} && \
+        git submodule update --init && \
+        source ${NVM_DIR}/nvm.sh && \
+        source /opt/rh/gcc-toolset-13/enable && \
+        while IFS= read -r src_patch; do echo "patches/$src_patch"; patch -p1 < "patches/$src_patch"; done < patches/series && \
+        nvm use ${NODE_VERSION} && \
+        npm install && \
+        npm run build && \
+        VERSION=${CODESERVER_VERSION/v/} npm run build:vscode && \
+        npm run release && \
+        npm run release:standalone && \
+        VERSION=${CODESERVER_VERSION/v/} npm run package && \
+        cp release-packages/code-server-${CODESERVER_VERSION/v/}-ppc64le.rpm /tmp/; \
+    fi
+
+####################
 # base             #
 ####################
 FROM registry.access.redhat.com/ubi9/python-311:latest AS base
@@ -49,8 +107,14 @@ WORKDIR /opt/app-root/bin
 # Install usefull OS packages
 RUN dnf install -y jq git-lfs libsndfile && dnf clean all && rm -rf /var/cache/yum
 
+
+# wait for rpm-base stage (rpm builds for ppc64le)
+COPY --from=rpm-base /tmp/control /dev/null
+
 # Install code-server
-RUN yum install -y "https://github.com/coder/code-server/releases/download/${CODESERVER_VERSION}/code-server-${CODESERVER_VERSION/v/}-amd64.rpm" && \
+RUN --mount=type=bind,from=rpm-base,source=/tmp/,target=/code-server-rpm/,rw \
+    ARCH=$(uname -m); [ "$ARCH" = "x86_64" ] && ARCH=amd64; \
+    yum install -y /code-server-rpm/code-server-${CODESERVER_VERSION/v/}-${ARCH}.rpm && \
     yum -y clean all --enablerepo='*'
 
 COPY --chown=1001:0 ${CODESERVER_SOURCE_CODE}/utils utils/
