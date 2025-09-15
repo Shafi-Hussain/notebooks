@@ -131,19 +131,18 @@ jobs:
 
       - name: Free up additional disk space
         # https://docs.github.com/en/actions/learn-github-actions/expressions
+        # NOTE: the arm64 GitHub hosted runner does not have the /mnt-mounted scratch disk
         if: "${{ contains(inputs.target, 'rocm') || contains(inputs.target, 'cuda') ||
-         contains(inputs.target, 'pytorch') || contains(inputs.target, 'tensorflow') }}"
+         contains(inputs.target, 'pytorch') || contains(inputs.target, 'tensorflow') ||
+         inputs.platform == 'linux/arm64' }}"
         run: |
           set -x
 
           df -h
 
           sudo apt-get update
-          sudo apt-get remove -y '^dotnet-.*'
-          sudo apt-get remove -y '^llvm-.*'
-          sudo apt-get remove -y 'php.*'
-          sudo apt-get remove -y '^mongodb-.*'
-          sudo apt-get autoremove -y
+          sudo apt-get purge -y '^dotnet-.*' '^llvm-.*' 'php.*' '^mongodb-.*'
+          sudo apt-get autoremove -y --purge
           sudo apt-get clean
           sudo rm -rf /usr/local/.ghcup &
           sudo rm -rf /usr/local/lib/android &
@@ -736,3 +735,11 @@ jobs:
 
       - run: sudo compsize -x "${HOME}/.local/share/containers"
         if: "${{ !cancelled() && steps.install-compsize.outcome == 'success' }}"
+
+      # print system logs, useful when hunting for OOM kills
+
+      - run: sudo dmesg
+        if: "${{ failure() }}"
+
+      - run: journalctl --no-pager -k
+        if: "${{ failure() }}"
